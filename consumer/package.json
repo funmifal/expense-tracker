@@ -1,0 +1,13 @@
+{
+  "name": "expense-tracker-api-consumer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Minimal standalone consumer of the publicly deployed Expense Tracker API (Step 8).",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.mjs"
+  }
+}

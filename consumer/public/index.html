@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Expense Tracker API — Consumer</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; }
+    h1 { font-size: 1.25rem; }
+    select { padding: 0.35rem 0.6rem; }
+    table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+    th, td { text-align: left; padding: 0.45rem 0.6rem; border-bottom: 1px solid #444; }
+    th { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.03em; opacity: 0.75; }
+    .controls { display: flex; gap: 0.75rem; align-items: center; }
+    .pager { display: flex; gap: 0.5rem; margin-top: 1rem; align-items: center; }
+    button { padding: 0.4rem 0.85rem; }
+    .muted { opacity: 0.7; font-size: 0.9rem; }
+    .banner { background: #7f1d1d; color: #fff; padding: 0.6rem 0.8rem; border-radius: 6px; margin-top: 1rem; }
+  </style>
+</head>
+<body>
+  <h1>Expense Tracker API consumer</h1>
+  <p class="muted">Reads live data from the publicly deployed API.</p>
+
+  <div class="controls">
+    <label for="categoryFilter">Category</label>
+    <select id="categoryFilter">
+      <option value="">All categories</option>
+    </select>
+    <span class="muted" id="summary"></span>
+  </div>
+
+  <div id="banner" class="banner" hidden></div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Date</th>
+        <th>Amount</th>
+        <th>Category</th>
+        <th>Payment</th>
+        <th>Description</th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+
+  <div class="pager">
+    <button id="prev" type="button">Previous</button>
+    <button id="next" type="button">Next Page</button>
+    <span class="muted" id="range"></span>
+  </div>
+
+  <script>
+    const PAGE_SIZE = 3;
+    let categoryId = '';
+    let offset = 0;
+    let meta = { total: 0, limit: PAGE_SIZE, offset: 0, hasMore: false };
+
+    const rowsEl = document.getElementById('rows');
+    const summaryEl = document.getElementById('summary');
+    const rangeEl = document.getElementById('range');
+    const bannerEl = document.getElementById('banner');
+    const filterEl = document.getElementById('categoryFilter');
+
+    function showError(message) {
+      bannerEl.textContent = `API error: ${message}`;
+      bannerEl.hidden = false;
+    }
+
+    async function loadCategories() {
+      const res = await fetch('/api/categories');
+      if (!res.ok) {
+        showError(`categories (${res.status})`);
+        return;
+      }
+      const { data } = await res.json();
+      for (const category of data) {
+        const option = document.createElement('option');
+        option.value = category.id;
+        option.textContent = category.name;
+        filterEl.appendChild(option);
+      }
+    }
+
+    function formatAmount(minorUnits, currency) {
+      return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(minorUnits / 100);
+    }
+
+    async function loadExpenses() {
+      bannerEl.hidden = true;
+      const query = new URLSearchParams({ offset: String(offset) });
+      if (categoryId) query.set('categoryId', categoryId);
+
+      const res = await fetch(`/api/expenses?${query}`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        showError(`${res.status} ${body.error?.message ?? ''}`.trim());
+        return;
+      }
+
+      const { data, meta: nextMeta } = await res.json();
+      meta = nextMeta;
+
+      rowsEl.replaceChildren();
+      for (const expense of data) {
+        const tr = document.createElement('tr');
+        const dateTd = document.createElement('td');
+        dateTd.textContent = new Date(expense.date).toLocaleDateString();
+        const amountTd = document.createElement('td');
+        amountTd.textContent = formatAmount(expense.amountMinorUnits, expense.currency);
+        const categoryTd = document.createElement('td');
+        categoryTd.textContent = expense.category;
+        const paymentTd = document.createElement('td');
+        paymentTd.textContent = expense.paymentMethod;
+        const descTd = document.createElement('td');
+        descTd.textContent = expense.description;
+        tr.append(dateTd, amountTd, categoryTd, paymentTd, descTd);
+        rowsEl.appendChild(tr);
+      }
+
+      if (data.length === 0) {
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 5;
+        td.textContent = 'No expenses found.';
+        tr.appendChild(td);
+        rowsEl.appendChild(tr);
+      }
+
+      const first = meta.total === 0 ? 0 : meta.offset + 1;
+      const last = Math.min(meta.offset + meta.limit, meta.total);
+      rangeEl.textContent = `Showing ${first}–${last} of ${meta.total}`;
+      summaryEl.textContent = categoryId ? `(filtered by category)` : '';
+      document.getElementById('prev').disabled = meta.offset <= 0;
+      document.getElementById('next').disabled = !meta.hasMore;
+    }
+
+    filterEl.addEventListener('change', () => {
+      categoryId = filterEl.value;
+      offset = 0;
+      loadExpenses();
+    });
+
+    document.getElementById('prev').addEventListener('click', () => {
+      offset = Math.max(0, offset - meta.limit);
+      loadExpenses();
+    });
+
+    document.getElementById('next').addEventListener('click', () => {
+      offset = offset + meta.limit;
+      loadExpenses();
+    });
+
+    loadCategories();
+    loadExpenses();
+  </script>
+</body>
+</html>
