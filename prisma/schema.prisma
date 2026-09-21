@@ -1,0 +1,188 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  currency     String   @default("USD")
+  planTier     PlanTier @default(FREE)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  expenses        Expense[]
+  categories      Category[]
+  budgets         Budget[]
+  budgetSnapshots BudgetPeriodSnapshot[]
+  paymentMethods  PaymentMethod[]
+  aiSuggestions   AiSuggestion[]
+  notifications   Notification[]
+  sessions        Session[]
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sessionToken String   @unique
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+
+  @@index([userId])
+}
+
+model Category {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  expenses Expense[]
+  budgets  Budget[]
+
+  @@unique([userId, name])
+  @@index([userId])
+}
+
+model PaymentMethod {
+  id       String    @id @default(cuid())
+  userId   String
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name     String
+  expenses Expense[]
+
+  @@unique([userId, name])
+  @@index([userId])
+}
+
+model Expense {
+  id               String         @id @default(cuid())
+  userId           String
+  user             User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  amountMinorUnits Int
+  currency         String
+  date             DateTime
+  categoryId       String
+  category         Category       @relation(fields: [categoryId], references: [id])
+  paymentMethodId  String?
+  paymentMethod    PaymentMethod? @relation(fields: [paymentMethodId], references: [id], onDelete: SetNull)
+  description      String?
+  isDeleted        Boolean        @default(false)
+  deletedAt        DateTime?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  history ExpenseHistory[]
+
+  @@index([userId, date])
+  @@index([userId, categoryId])
+  @@index([userId, isDeleted])
+}
+
+model ExpenseHistory {
+  id        String   @id @default(cuid())
+  expenseId String
+  expense   Expense  @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  changedAt DateTime @default(now())
+  changedBy String
+  fieldName String
+  oldValue  String
+  newValue  String
+
+  @@index([expenseId])
+}
+
+model Budget {
+  id               String   @id @default(cuid())
+  userId           String
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  categoryId       String?
+  category         Category? @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  amountMinorUnits Int
+  periodStart      DateTime
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  snapshots BudgetPeriodSnapshot[]
+
+  @@unique([userId, categoryId, periodStart])
+  @@index([userId, periodStart])
+}
+
+model BudgetPeriodSnapshot {
+  id                     String   @id @default(cuid())
+  budgetId               String
+  budget                 Budget   @relation(fields: [budgetId], references: [id], onDelete: Cascade)
+  userId                 String
+  user                   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  categoryId             String?
+  periodStart            DateTime
+  budgetAmountMinorUnits Int
+  spentMinorUnits        Int
+  closedAt               DateTime @default(now())
+
+  @@index([userId, periodStart])
+  @@index([budgetId])
+}
+
+model AiSuggestion {
+  id              String             @id @default(cuid())
+  userId          String
+  user            User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type            AiSuggestionType
+  status          AiSuggestionStatus @default(PENDING)
+  inputSummary    Json
+  outputPayload   Json
+  confidence      Float?
+  targetExpenseId String?
+  createdAt       DateTime           @default(now())
+  resolvedAt      DateTime?
+
+  @@unique([userId, targetExpenseId, type])
+  @@index([userId, status])
+}
+
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      NotificationType
+  message   String
+  isRead    Boolean          @default(false)
+  createdAt DateTime         @default(now())
+
+  @@index([userId, isRead])
+}
+
+enum PlanTier {
+  FREE
+  PAID
+}
+
+enum AiSuggestionType {
+  CATEGORIZATION
+  SUMMARY
+  ANOMALY
+  BUDGET_SUGGESTION
+}
+
+enum AiSuggestionStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  EXPIRED
+}
+
+enum NotificationType {
+  BUDGET_WARNING
+  BUDGET_EXCEEDED
+  AI_INSIGHT_READY
+}
