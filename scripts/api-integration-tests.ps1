@@ -1,5 +1,6 @@
 param(
-  [string]$BaseUrl = 'http://localhost:3000'
+  [string]$BaseUrl = 'http://localhost:3000',
+  [switch]$RunBurst
 )
 
 $ErrorActionPreference = 'Stop'
@@ -20,7 +21,7 @@ function TryReq($method, $path, $body, $session, $contentType = 'application/jso
     $r = Invoke-WebRequest @params
     $json = $null
     try { $json = $r.Content | ConvertFrom-Json } catch {}
-    return @{ status = $r.StatusCode; body = $r.Content; json = $json; response = $r }
+    return @{ status = $r.StatusCode; body = $r.Content; json = $json; response = $r; headers = $r.Headers }
   } catch {
     $status = $null; $content = $null
     if ($_.Exception.Response) {
@@ -32,7 +33,9 @@ function TryReq($method, $path, $body, $session, $contentType = 'application/jso
     }
     $json = $null
     try { $json = $content | ConvertFrom-Json } catch {}
-    return @{ status = $status; body = $content; json = $json; response = $null }
+    $headers = $null
+    try { $headers = $_.Exception.Response.Headers } catch {}
+    return @{ status = $status; body = $content; json = $json; response = $null; headers = $headers }
   }
 }
 
@@ -61,9 +64,10 @@ p.user.deleteMany({where:{email:{startsWith:"apitest."}}})
 try {
   Invoke-CleanupTestUsers
 
-  Write-Output "== Step 3 regression =="
+  if (-not $RunBurst) {
+    Write-Output "== Step 3 regression =="
 
-  $r = TryReq 'GET' '/api/v1/expenses' $null $null
+    $r = TryReq 'GET' '/api/v1/expenses' $null $null
   Check 'unauth GET /expenses -> 401' ($r.status -eq 401)
   Check 'error envelope has code+message' ($r.json.error.code -and $r.json.error.message)
 
@@ -87,6 +91,8 @@ try {
 
   $r = TryReq 'GET' '/api/v1/users/me' $null $session
   Check 'GET /users/me -> 200, currency USD' ($r.status -eq 200 -and $r.json.data.user.currency -eq 'USD')
+  Check 'rate-limit header present (X-RateLimit-Limit)' ($r.headers['X-RateLimit-Limit'] -match '^\d+$')
+  Check 'rate-limit remaining present and within limit' ([int]$r.headers['X-RateLimit-Remaining'] -ge 0 -and [int]$r.headers['X-RateLimit-Remaining'] -le [int]$r.headers['X-RateLimit-Limit'])
 
   $r = TryReq 'GET' '/api/v1/categories?limit=100' $null $session
   Check 'categories total=9, hasMore=false' ($r.json.meta.total -eq 9 -and $r.json.data.Count -eq 9 -and $r.json.meta.hasMore -eq $false)
@@ -285,6 +291,30 @@ try {
 
   $r = TryReq 'GET' ('/api/v1/expenses/' + $eid) $null $session
   Check 'GET soft-deleted expense still -> 404' ($r.status -eq 404)
+  }
+
+  if ($RunBurst) {
+    Write-Output "== Rate limiting burst =="
+    $probe = TryReq 'GET' '/api/v1/expenses' $null $null
+    $limitVal = 0
+    if ($probe.headers['X-RateLimit-Limit']) { $limitVal = [int]$probe.headers['X-RateLimit-Limit'] }
+    Check 'effective rate limit read from header' ($limitVal -ge 1)
+    $saw429 = $false
+    $retryAfter = ''
+    $envelope = $false
+    for ($i = 0; $i -le $limitVal; $i++) {
+      $r = TryReq 'GET' '/api/v1/expenses' $null $null
+      if ($r.status -eq 429) {
+        $saw429 = $true
+        $retryAfter = $r.headers['Retry-After']
+        $envelope = ($r.json.error.code -eq 'RATE_LIMITED')
+        break
+      }
+    }
+    Check 'burst triggers 429 RATE_LIMITED' ($saw429 -and $envelope)
+    Check '429 carries Retry-After >= 1 seconds' ($retryAfter -match '^\d+$' -and [int]$retryAfter -ge 1)
+    Check '429 body is error envelope without data' ($r.json.data -eq $null -and $r.json.error.message -ne $null)
+  }
 
 } finally {
   Invoke-CleanupTestUsers
