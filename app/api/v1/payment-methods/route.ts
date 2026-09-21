@@ -4,8 +4,8 @@ import { fail, ok, okList } from '@/lib/api/http';
 import { buildMeta } from '@/lib/api/pagination';
 import { parseQuery } from '@/lib/api/query';
 import { getAuthenticatedUser } from '@/lib/auth/get-authenticated-user';
-import { BudgetService } from '@/lib/budgets/budget-service';
-import { budgetListQuerySchema } from '@/lib/validation/schemas';
+import { PaymentMethodService } from '@/lib/payment-methods/payment-method-service';
+import { paymentMethodListQuerySchema } from '@/lib/validation/schemas';
 
 export async function GET(req: NextRequest) {
   try {
@@ -14,10 +14,10 @@ export async function GET(req: NextRequest) {
       return fail(401, 'UNAUTHORIZED', 'Authentication required');
     }
 
-    const query = parseQuery(budgetListQuerySchema, new URL(req.url).searchParams);
+    const query = parseQuery(paymentMethodListQuerySchema, new URL(req.url).searchParams);
 
-    const { items, total } = await BudgetService.listBudgets(user.id, {
-      filters: { periodStart: query.periodStart, categoryId: query.categoryId },
+    const { items, total } = await PaymentMethodService.listPaymentMethods(user.id, {
+      filters: { name: query.name, id: query.id },
       pagination: { limit: query.limit, offset: query.offset },
       sort: { field: query.sort, order: query.order },
     });
@@ -36,8 +36,8 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json();
-    const budget = await BudgetService.createBudget(user.id, body);
-    return ok(budget, 201);
+    const paymentMethod = await PaymentMethodService.createPaymentMethod(user.id, body);
+    return ok(paymentMethod, 201);
   } catch (error) {
     return handleError(error);
   }

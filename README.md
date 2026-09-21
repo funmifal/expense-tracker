@@ -99,9 +99,86 @@ Authoritative money is stored as `Int` minor units (integer cents) — never `Fl
 
 ---
 
+## Task 1 — Step 3: REST API
+
+All routes live under `/api/v1/`. Collection endpoints support pagination (`limit` + `offset`), filtering, and sorting. Every response uses a consistent envelope.
+
+### Conventions
+
+- **Success** — `{ "data": ... }`
+- **List** — `{ "data": [...], "meta": { "total", "limit", "offset", "hasMore" } }`
+- **Error** — `{ "error": { "code", "message", "details?" } }` — `details` is an array of `{ field, message }` included on validation failures so the offending field is always identified.
+- **Status codes** — `200` ok/updated, `201` created, `400` invalid query (`INVALID_QUERY`), malformed path identifier (`INVALID_ID`), or malformed JSON (`INVALID_JSON`), `401` unauthenticated (`UNAUTHORIZED`) or bad login (`INVALID_CREDENTIALS`), `404` not found, `409` conflict (duplicate email/category/payment method/budget, category in use), `422` body validation failure (`VALIDATION_ERROR`).
+- **Auth** — every route requires a session. Send the `next-auth.session-token` cookie (set on register/login) or `Authorization: Bearer <token>`. All queries are scoped to the authenticated user. Rate limiting is deferred to a later step.
+- **Validation** — request bodies and query parameters are defined and enforced with Zod schemas in one place (`lib/validation/schemas.ts`). Body failures → `422 VALIDATION_ERROR` with field details; query failures → `400 INVALID_QUERY` with field details.
+- **Pagination** — `limit` (default `20`) is clamped to the configured maximum of `100` (e.g. `limit=5000` → `100`), never honoured as-is. `offset` (default `0`) must be a non-negative integer; `offset=-5` → `400`. `meta.total` is the pre-pagination count, `meta.hasMore` indicates another page exists.
+- **Filtering (every list has ≥ 2 filters)** — see per-resource filters below. Unparseable filter values (e.g. a non-date `startDate`) return `400 INVALID_QUERY` and never a `500`.
+- **Sorting** — `sort=<field>&order=asc|desc` over a per-resource allowlist. Unknown fields are rejected with `400 INVALID_QUERY` — never silently ignored.
+- **Identifiers** — path ids are validated before lookup: clearly malformed ids → `400 INVALID_ID`; well-formed but nonexistent ids → `404`. Neither path ever produces a `500`.
+
+### Endpoints
+
+**Auth / Users**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/v1/auth/register` | Create user (email, password, currency) and start session → `201` |
+| POST | `/api/v1/auth/login` | email + password → session cookie |
+| POST | `/api/v1/auth/logout` | Revoke session and clear cookie |
+| POST | `/api/v1/users` | Same as register (alias) |
+| GET | `/api/v1/users/me` | Current user profile |
+
+**Categories**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/v1/categories` | List. Filters: `name` (partial, case-insensitive), `isDefault`. Sort: `name`, `createdAt` (default `name asc`) |
+| POST | `/api/v1/categories` | Create (name must be unique per user) |
+| GET | `/api/v1/categories/:id` | Fetch one |
+| PATCH | `/api/v1/categories/:id` | Rename (must stay unique) |
+| DELETE | `/api/v1/categories/:id` | Delete; `409 CATEGORY_IN_USE` if referenced by any expense or budget |
+
+**Payment Methods**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/v1/payment-methods` | List. Filters: `name` (partial, case-insensitive), `id`. Sort: `name`, `id` (default `name asc`) |
+| POST | `/api/v1/payment-methods` | Create (name must be unique per user) |
+| GET | `/api/v1/payment-methods/:id` | Fetch one |
+| PATCH | `/api/v1/payment-methods/:id` | Rename |
+| DELETE | `/api/v1/payment-methods/:id` | Delete; expenses keep working with `paymentMethodId` nulled |
+
+**Expenses**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/v1/expenses` | List (excludes soft-deleted). Filters: `categoryId`, `paymentMethodId`, `startDate`, `endDate`, `minAmount`, `maxAmount` (minor units). Sort: `date`, `amountMinorUnits`, `createdAt` (default `date desc`) |
+| POST | `/api/v1/expenses` | Create (amountMinorUnits, date, categoryId required) |
+| GET | `/api/v1/expenses/:id` | Fetch one |
+| PATCH | `/api/v1/expenses/:id` | Update; writes an `ExpenseHistory` audit row |
+| DELETE | `/api/v1/expenses/:id` | Soft delete (sets `isDeleted`/`deletedAt`; excluded from lists) |
+
+**Budgets**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/v1/budgets` | List. Filters: `periodStart` (client date, normalized to that UTC month), `categoryId`. Sort: `periodStart`, `amountMinorUnits`, `createdAt` (default `periodStart desc`) |
+| POST | `/api/v1/budgets` | Create overall (`categoryId` omitted) or per-category budget (one per category per month) |
+| GET | `/api/v1/budgets/:id` | Fetch one |
+| PATCH | `/api/v1/budgets/:id` | Update amount; snapshots prior value for period |
+
+---
+
 ## Status
 
 **Step 1 (resource design) — complete.**
 **Step 2 (seed data) — complete.** `prisma/seed.ts` populates a repeatable, idempotent dataset with `@faker-js/faker` (300 users, 2,700 categories, 1,200 payment methods, 2,700 budgets, 6,000 expenses, plus audit/history records). Running it again inserts nothing new.
 
-No API endpoints, pagination, filtering, sorting, rate limiting, deployment, or UI have been implemented yet.
+**Step 3 (API endpoints) — complete.** All `/api/v1/` endpoints above implemented and verified end-to-end: pagination, filters, sorting, validation (422), conflict (409), not-found (404), auth (401), and malformed-query (400) cases all tested live; `npx tsc --noEmit` and `npm run build` pass.
+
+**Step 4 (ugly inputs) — complete.** Query parameters and request bodies are validated with Zod schemas centralized in `lib/validation/schemas.ts`. `limit` is clamped to `100` (never honoured beyond the max), negative/zero/non-integer offsets and limits return `400 INVALID_QUERY`, unknown `sort`/`order` values return `400` instead of being ignored, malformed identifiers return `400 INVALID_ID` (absent ones `404`, never `500`), and `POST`/`PATCH` bodies missing or mistyping required fields return `422 VALIDATION_ERROR` with the offending field named in `error.details`.
+
+Regression + bad-input coverage lives in `scripts/api-integration-tests.ps1` (67 checks). Run it against a running dev server:
+`powershell -ExecutionPolicy Bypass -File scripts/api-integration-tests.ps1 -BaseUrl http://localhost:3000`
+
+Not implemented yet: rate limiting, deployment, and the consumer UI (later steps).

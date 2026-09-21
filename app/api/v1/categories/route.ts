@@ -4,8 +4,8 @@ import { fail, ok, okList } from '@/lib/api/http';
 import { buildMeta } from '@/lib/api/pagination';
 import { parseQuery } from '@/lib/api/query';
 import { getAuthenticatedUser } from '@/lib/auth/get-authenticated-user';
-import { BudgetService } from '@/lib/budgets/budget-service';
-import { budgetListQuerySchema } from '@/lib/validation/schemas';
+import { CategoryService } from '@/lib/categories/category-service';
+import { categoryListQuerySchema } from '@/lib/validation/schemas';
 
 export async function GET(req: NextRequest) {
   try {
@@ -14,10 +14,10 @@ export async function GET(req: NextRequest) {
       return fail(401, 'UNAUTHORIZED', 'Authentication required');
     }
 
-    const query = parseQuery(budgetListQuerySchema, new URL(req.url).searchParams);
+    const query = parseQuery(categoryListQuerySchema, new URL(req.url).searchParams);
 
-    const { items, total } = await BudgetService.listBudgets(user.id, {
-      filters: { periodStart: query.periodStart, categoryId: query.categoryId },
+    const { items, total } = await CategoryService.listCategories(user.id, {
+      filters: { name: query.name, isDefault: query.isDefault },
       pagination: { limit: query.limit, offset: query.offset },
       sort: { field: query.sort, order: query.order },
     });
@@ -36,8 +36,8 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json();
-    const budget = await BudgetService.createBudget(user.id, body);
-    return ok(budget, 201);
+    const category = await CategoryService.createCategory(user.id, body);
+    return ok(category, 201);
   } catch (error) {
     return handleError(error);
   }

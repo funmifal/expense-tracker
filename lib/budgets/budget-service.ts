@@ -1,19 +1,36 @@
+import { Prisma } from '@prisma/client';
 import prisma from '@/lib/db/prisma';
 import { createBudgetSchema, updateBudgetSchema } from '@/lib/validation/schemas';
 import { calculatePercentage } from '@/lib/money/money';
+import { ApiError } from '@/lib/api/errors';
+import { Pagination, Sort } from '@/lib/api/pagination';
 import { z } from 'zod';
 
 export type CreateBudgetInput = z.infer<typeof createBudgetSchema>;
 export type UpdateBudgetInput = z.infer<typeof updateBudgetSchema>;
 
+export interface BudgetListOptions {
+  filters: { periodStart?: Date; categoryId?: string };
+  pagination: Pagination;
+  sort: Sort;
+}
+
+function buildOrderBy(sort: Sort): Prisma.BudgetOrderByWithRelationInput[] {
+  switch (sort.field) {
+    case 'amountMinorUnits':
+      return [{ amountMinorUnits: sort.order }];
+    case 'createdAt':
+      return [{ createdAt: sort.order }];
+    case 'periodStart':
+    default:
+      return [{ periodStart: sort.order }];
+  }
+}
+
 export class BudgetService {
-  /**
-   * Creates a new monthly budget (overall or per-category) for the user.
-   */
   static async createBudget(userId: string, input: CreateBudgetInput) {
     const validated = createBudgetSchema.parse(input);
 
-    // Defense-in-depth: Reject second null-category (overall) budget for same user+period
     if (validated.categoryId === null || validated.categoryId === undefined) {
       const existingOverall = await prisma.budget.findFirst({
         where: {
@@ -22,16 +39,16 @@ export class BudgetService {
           periodStart: validated.periodStart,
         },
       });
-
       if (existingOverall) {
-        throw new Error('An overall budget already exists for this period');
+        throw new ApiError(409, 'BUDGET_EXISTS', 'An overall budget already exists for this period');
       }
     } else {
-      // Validate category ownership
-      const cat = await prisma.category.findFirst({
+      const category = await prisma.category.findFirst({
         where: { id: validated.categoryId, userId },
       });
-      if (!cat) throw new Error('Category not found or unauthorized');
+      if (!category) {
+        throw new ApiError(404, 'CATEGORY_NOT_FOUND', 'Category not found or does not belong to user');
+      }
 
       const existingCategoryBudget = await prisma.budget.findFirst({
         where: {
@@ -40,9 +57,8 @@ export class BudgetService {
           periodStart: validated.periodStart,
         },
       });
-
       if (existingCategoryBudget) {
-        throw new Error('A budget for this category already exists for this period');
+        throw new ApiError(409, 'BUDGET_EXISTS', 'A budget for this category already exists for this period');
       }
     }
 
@@ -59,25 +75,27 @@ export class BudgetService {
     });
   }
 
-  /**
-   * Updates an existing budget mid-period, creating a BudgetPeriodSnapshot to preserve historical integrity.
-   */
-  static async updateBudget(userId: string, budgetId: string, input: UpdateBudgetInput) {
-    const validated = updateBudgetSchema.parse(input);
-
-    const existing = await prisma.budget.findFirst({
+  static async getBudget(userId: string, budgetId: string) {
+    const budget = await prisma.budget.findFirst({
       where: { id: budgetId, userId },
       include: { category: true },
     });
-
-    if (!existing) {
-      throw new Error('Budget not found or unauthorized');
+    if (!budget) {
+      throw new ApiError(404, 'BUDGET_NOT_FOUND', 'Budget not found');
     }
+    return budget;
+  }
 
-    // Calculate current spending for this budget's category & period
-    const periodEnd = new Date(Date.UTC(existing.periodStart.getUTCFullYear(), existing.periodStart.getUTCMonth() + 1, 1));
-    
-    const expenseWhere: any = {
+  static async updateBudget(userId: string, budgetId: string, input: UpdateBudgetInput) {
+    const validated = updateBudgetSchema.parse(input);
+
+    const existing = await this.getBudget(userId, budgetId);
+
+    const periodEnd = new Date(
+      Date.UTC(existing.periodStart.getUTCFullYear(), existing.periodStart.getUTCMonth() + 1, 1),
+    );
+
+    const expenseWhere: Prisma.ExpenseWhereInput = {
       userId,
       isDeleted: false,
       date: {
@@ -85,7 +103,6 @@ export class BudgetService {
         lt: periodEnd,
       },
     };
-
     if (existing.categoryId) {
       expenseWhere.categoryId = existing.categoryId;
     }
@@ -94,11 +111,9 @@ export class BudgetService {
       where: expenseWhere,
       _sum: { amountMinorUnits: true },
     });
-
-    const spentMinorUnits = spendingSum._sum.amountMinorUnits || 0;
+    const spentMinorUnits = spendingSum._sum.amountMinorUnits ?? 0;
 
     return prisma.$transaction(async (tx) => {
-      // Write snapshot before modifying the budget amount
       await tx.budgetPeriodSnapshot.create({
         data: {
           budgetId: existing.id,
@@ -111,7 +126,6 @@ export class BudgetService {
         },
       });
 
-      // Apply mid-period budget edit prospectively
       return tx.budget.update({
         where: { id: budgetId },
         data: {
@@ -125,11 +139,34 @@ export class BudgetService {
     });
   }
 
-  /**
-   * Calculates real-time budget usage and threshold alerts (80% / 100%+).
-   */
+  static async listBudgets(userId: string, options: BudgetListOptions) {
+    const where: Prisma.BudgetWhereInput = { userId };
+
+    if (options.filters.periodStart) {
+      where.periodStart = options.filters.periodStart;
+    }
+    if (options.filters.categoryId) {
+      where.categoryId = options.filters.categoryId;
+    }
+
+    const [items, total] = await Promise.all([
+      prisma.budget.findMany({
+        where,
+        skip: options.pagination.offset,
+        take: options.pagination.limit,
+        orderBy: buildOrderBy(options.sort),
+        include: { category: true },
+      }),
+      prisma.budget.count({ where }),
+    ]);
+
+    return { items, total };
+  }
+
   static async getBudgetUsage(userId: string, periodStart: Date) {
-    const periodEnd = new Date(Date.UTC(periodStart.getUTCFullYear(), periodStart.getUTCMonth() + 1, 1));
+    const periodEnd = new Date(
+      Date.UTC(periodStart.getUTCFullYear(), periodStart.getUTCMonth() + 1, 1),
+    );
 
     const budgets = await prisma.budget.findMany({
       where: { userId, periodStart },
@@ -139,7 +176,7 @@ export class BudgetService {
     const usageReport = [];
 
     for (const budget of budgets) {
-      const expenseWhere: any = {
+      const expenseWhere: Prisma.ExpenseWhereInput = {
         userId,
         isDeleted: false,
         date: {
@@ -147,7 +184,6 @@ export class BudgetService {
           lt: periodEnd,
         },
       };
-
       if (budget.categoryId) {
         expenseWhere.categoryId = budget.categoryId;
       }
@@ -156,8 +192,7 @@ export class BudgetService {
         where: expenseWhere,
         _sum: { amountMinorUnits: true },
       });
-
-      const spentMinorUnits = spendingSum._sum.amountMinorUnits || 0;
+      const spentMinorUnits = spendingSum._sum.amountMinorUnits ?? 0;
       const percentage = calculatePercentage(spentMinorUnits, budget.amountMinorUnits);
       const remainingMinorUnits = Math.max(0, budget.amountMinorUnits - spentMinorUnits);
 
@@ -171,7 +206,7 @@ export class BudgetService {
       usageReport.push({
         budgetId: budget.id,
         categoryId: budget.categoryId,
-        categoryName: budget.category?.name || 'Overall',
+        categoryName: budget.category?.name ?? 'Overall',
         budgetAmountMinorUnits: budget.amountMinorUnits,
         spentMinorUnits,
         remainingMinorUnits,
